@@ -145,6 +145,68 @@ corpus.
 because its failure mode is silent truncation rather than a single bad item.
 Anywhere a partial failure should be survivable, iterate defensively.
 
+## 6. Coverage that counted missing terms as matches
+
+Found by the adversarial suite, and the most consequential ranking bug of the set.
+
+**Symptom.** Searching `"toy choke hazard"` against a corpus whose only record
+was a kettle recall returned that record with a score of **1.083** — higher than
+a genuine three-term match. Also, `"lithium battery fire"` returned *something*.
+
+**Cause.** `idf()` returned `0.0` for any term the corpus had never seen:
+
+```python
+def idf(self, token):
+    return self._idf.get(token, 0.0)      # unseen term -> weight 0
+```
+
+Coverage is `matched_weight / total_query_weight`, and both sides are summed over
+query terms. For `"toy choke hazard"` against a one-record corpus, `toy` and
+`choke` were absent and therefore contributed **zero to the denominator**, while
+`hazard` contributed its full weight to the numerator. Coverage came out at
+exactly **1.0**.
+
+In other words: the more of your query the corpus had never heard of, the better
+your match looked. Since a real user's query almost always contains words absent
+from the corpus, this was not an edge case — it was the normal path.
+
+**Fix.** An unseen term is treated as maximally rare (`df = 0`), giving it the
+highest possible weight. The same query now scores **0.177** and is rejected.
+Coverage became meaningful: it measures what fraction of the *query* was found,
+not what fraction of the *found terms* were in the query.
+
+**How it was caught.** Not by a ranking test. Ranking tests use queries built
+from corpus vocabulary, where every term is present and the bug is invisible. It
+surfaced from a documentation test asserting a negative: *an unrelated query
+returns nothing*. Writing down what the system claims and executing that claim is
+what exposed it.
+
+## 7. Three smaller gaps found by adversarial testing
+
+**A `key` that could not be searched.** The index was built from title and body
+only, so a user searching for a product id, model number or statute reference —
+the most obvious query for a keyed corpus — could never match. The key is now
+part of the indexed text.
+
+**An ASCII-only tokeniser.** The word pattern was `[a-z0-9]+`, so CJK, Cyrillic
+and Arabic text tokenised to *nothing*, and any corpus in those scripts was
+permanently unsearchable. Now `\w+` with Unicode semantics. A Japanese key that
+previously could not be retrieved at all now round-trips, including across a
+reopen.
+
+**No way to retire a record.** A recall can be rescinded upstream, and the corpus
+has to reflect that. There was no API for it, so the only option was a raw
+`UPDATE` — which does not bump the data version, so the search index kept serving
+the withdrawn record. `Store.retire()` and `unretire()` now exist, bump the
+version, and emit an event. Reaching into the database bypassing the store is
+exactly the kind of shortcut a framework should make unnecessary.
+
+**The general lesson.** Two of these three (unsearchable keys, unsearchable
+scripts) were complete functional failures for whole classes of corpus that the
+existing tests could never have noticed, because every test used Latin text and
+body-only queries. Adversarial tests are worth writing precisely because they
+attack the assumptions the happy-path tests were built on.
+
 ## Open questions
 
 - **Matching quality.** Token overlap is inspectable and dependency-free but

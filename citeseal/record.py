@@ -166,9 +166,15 @@ class Record:
 
     @property
     def index_text(self) -> str:
-        """Text handed to the matcher: title plus body, title weighted by
-        repetition because a title match is a stronger signal than a body one."""
-        return f"{self.title} {self.title} {self.body}".strip()
+        """Text handed to the matcher.
+
+        The key is included: for a corpus where keys are product ids, model
+        numbers or statute references, a user searching for exactly that
+        identifier is the most obvious query there is, and leaving the key
+        unindexed made it unanswerable. Titles are repeated because a title match
+        is a stronger signal than one buried in the body.
+        """
+        return f"{self.key} {self.title} {self.title} {self.body}".strip()
 
     def as_dict(self) -> dict[str, Any]:
         """The only shape this framework shows to a caller."""

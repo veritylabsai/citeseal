@@ -1,7 +1,16 @@
 # Citeseal
 
-**Cited-or-nothing retrieval.** Turn any corpus into a ground-truth MCP server
-that cannot invent an answer.
+**Retrieval that returns a source, or nothing at all.**
+
+Ask a normal search system a question it has no good answer to and it still
+returns its closest matches — and an LLM on top will write a confident paragraph
+about them. That is how an agent ends up telling someone a product isn't
+recalled when it simply has no record either way.
+
+Citeseal is the opposite by construction. You point it at a corpus. It stores
+cited records and, at query time, returns **those records or an explicit
+"no verified record"**. There is no model in the query path, so it cannot
+paraphrase, summarise, or invent — it has no mechanism for any of it.
 
 ```python
 from citeseal import Citation, Engine, Record, Store
@@ -19,32 +28,67 @@ store.upsert(Record(
 ))
 
 engine = Engine(store)
-engine.verify("kettle burn hazard").found        # True  -> cited records
-engine.verify("something not in the corpus")     # False -> explicit negative
+
+engine.verify("kettle burn hazard").results[0]["source_url"]
+# 'https://example.gov/recalls/northwind-aurelia-kettle'
+
+engine.verify("lithium battery fire")
+# found=False  reason='no record in the store matches this query'
 ```
 
-## The one idea
+That second result is the product. A weaker system would have returned the
+kettle anyway, because it is the only thing in the corpus.
 
-Most retrieval systems answer with *something*. Citeseal answers with **a stored
-record or nothing at all**. There is no model in the query path, no
-summarisation, no paraphrase.
+## Is this for you?
 
-That rule is not a convention you have to remember. It is enforced in the types:
+**Use it if** an agent under your control answers questions where being wrong is
+expensive — compliance, safety, policy, eligibility, anything with a regulator
+or a lawyer behind it — and you can point it at an authoritative source.
+
+**Don't use it if** you want the model to write prose over documents. This is not
+RAG and does not pretend to be. It never generates text. See
+[What this is not](#what-this-is-not).
+
+## How it works
+
+```
+  upstream API ──▶  Source  ──▶  Store  ──▶  Index  ──▶  Engine  ──▶  Answer
+   (any shape)     you write    SQLite      cached      lookup     found, or
+                                  │                              not found
+                                  └──▶  change feed (what moved, and when)
+```
+
+You write one class — a `Source` that fetches from your upstream and yields
+`Record`s. Everything else is the framework's job.
+
+Three objects matter:
+
+| | |
+|---|---|
+| **`Record`** | One unit of ground truth: a key, a kind, a title, searchable text, and a **citation**. |
+| **`Source`** | How your upstream becomes `Record`s. The only thing a new corpus implements. |
+| **`Answer`** | What a query returns: cited results, or an explicit negative with a reason. |
+
+## The rule is enforced, not promised
+
+Most "no hallucination" claims are a system prompt and a hope. Here it is a type
+invariant, checked when objects are constructed:
 
 ```python
-Citation(url="", source_name="X")          # raises UncitedRecordError
-Record(..., citation={"url": "..."})       # raises UncitedRecordError
-Answer(found=True, results=({},))          # raises UncitedRecordError
+Citation(url="", source_name="X")        # UncitedRecordError
+Citation(url="ftp://x/y", source_name="X")  # UncitedRecordError
+Record(..., citation={"url": "..."})     # UncitedRecordError (needs a Citation)
+Answer(found=True, results=({},))        # UncitedRecordError (result has no source)
+Answer(found=False, results=(...))       # ValueError (a negative carries no results)
 ```
 
-No construction path produces an uncited record, so no query can return one.
-`Answer` also refuses to be `found=False` *and* carry results — an explicit
-negative is not a partial match.
+There is no constructor that skips these, so no query path can return an uncited
+answer. You cannot forget to check, because you cannot build the object.
 
-## Conformance, not vibes
+## Prove it on your corpus, in one command
 
-A corpus either honours the guarantees or it does not, and that is a decidable
-question. So it is a command:
+A corpus either honours the guarantees or it does not, and that is decidable — so
+it is a command rather than a paragraph:
 
 ```console
 $ python -m citeseal.conformance --db corpus.sqlite3
@@ -62,26 +106,27 @@ Citeseal conformance report
 RESULT: PASS
 ```
 
-**G3 is the interesting one.** It re-queries the corpus and compares each result
-byte-for-byte against the store. If any result text differs, something
+**G3 is the one that matters.** It re-queries your corpus and compares every
+result byte-for-byte against the store. If any result text differs, something
 synthesised it and the corpus fails. That is the anti-hallucination property,
-mechanically checked rather than promised.
+mechanically checked.
 
-Exit code is 0 on pass. Wire it into CI and the guarantee cannot silently rot.
+Exit code is 0 on pass, so it drops straight into CI and cannot silently rot.
 
-## Why a framework rather than a library
+## Building a corpus
 
-The engine is small — a few hundred lines. The value is not in the code; it is in
-the properties the code makes unavoidable. A second corpus has to implement
-**one thing**:
+Implement one class:
 
 ```python
+from citeseal import Citation, Record
+from citeseal.sources import build_records
+
 class MyCorpus:
     key = "my-corpus"
     name = "My Upstream"
 
-    def fetch(self) -> Iterable[Record]:
-        rows = fetch_my_upstream()
+    def fetch(self):
+        rows = fetch_my_upstream()            # whatever your API returns
         return build_records(rows, self._to_record, on_error=self.errors.append)
 
     def _to_record(self, raw) -> Record:
@@ -89,85 +134,108 @@ class MyCorpus:
             key=raw["id"],
             kind="notice",
             title=raw["title"],
-            body=raw["text"],
+            body=raw["text"],                 # the text that gets searched
             citation=Citation(url=raw["url"], source_name=raw["authority"]),
         )
 ```
 
-Storage, indexing, matching, the change feed, negative reporting and citation
-enforcement are the framework's problem, not the adapter's. `examples/demo.py`
-builds two corpora with **no fields and no domain in common** — a structured
-recall feed and a curated glossary — and both pass all six guarantees.
-
-## Install
-
-```console
-pip install citeseal              # core: no dependencies at all
-pip install "citeseal[serve]"     # optional: FastAPI + MCP serving
-```
-
-The core deliberately has zero dependencies. Storage is SQLite from the standard
-library. A framework whose selling point is auditability should be installable
-and readable without a dependency tree.
-
-## CLI
+Then:
 
 ```console
 citeseal ingest  --db corpus.sqlite3 --source mycorpus.sources:MyCorpus
 citeseal query   --db corpus.sqlite3 "kettle burn hazard"
-citeseal changes --db corpus.sqlite3 --since 2026-01-01T00:00:00Z
 citeseal check   --db corpus.sqlite3
-citeseal stats   --db corpus.sqlite3
 ```
 
-`query` exits non-zero when nothing matches, so it composes in a shell.
+`build_records` is not decoration. A `fetch()` generator that raises on one bad
+row **terminates**, silently dropping every row after it — my first version lost a
+whole corpus to one apostrophe in a key. `build_records` skips and reports the bad
+row instead.
+
+### It has to work for more than one corpus
+
+A framework that only ever served one corpus is a library with delusions. So the
+repository proves it: `examples/demo.py` builds two corpora with **no fields and
+no domain in common** — a structured recall feed and a curated glossary — plus a
+combined registry, and all three pass every guarantee.
+
+```console
+$ python examples/demo.py
+...
+ALL CORPORA PASSED
+```
+
+## Install
+
+```console
+pip install citeseal              # core: zero dependencies
+pip install "citeseal[serve]"     # optional: FastAPI + MCP serving
+```
+
+The core has no runtime dependencies. Storage is SQLite from the standard
+library; the only network call is `urllib`. A framework whose selling point is
+auditability should be installable and readable without a dependency tree.
 
 ## What this is not
 
-Worth being blunt, because the category invites overclaiming:
+Blunt, because the category invites overclaiming:
 
 - **Not a model, and not RAG.** There is no generation step to ground. If you
-  want an LLM to write prose over a corpus, this is not that, and it will not
-  pretend to be.
-- **Not a guarantee about the world.** `found: false` means *not in this store*,
-  never *not true*. Every negative response says so in the payload. A well-built
-  corpus can still be wrong, stale, or incomplete — Citeseal makes it
-  **auditable**, not infallible.
-- **Not a cure for a bad corpus.** It enforces that every record has a citation.
-  It cannot tell you whether the citation supports the claim. That judgement
-  stays with whoever curates the corpus.
-- **Not an embedder.** Matching is IDF-weighted token overlap: fast, inspectable,
-  dependency-free, and weaker than a vector index on paraphrase. It was chosen so
-  that a result can always be explained in terms of terms that matched. A vector
-  backend is a reasonable future addition, not a missing feature.
+  want an LLM writing prose over documents, this is not that.
+- **Not a claim about the world.** `found: false` means *not in this store*,
+  never *not true*. Every negative says so in the payload, and so should your
+  agent.
+- **Not a cure for a bad corpus.** It enforces that a citation *exists*. It
+  cannot check that the citation *supports* the claim. That judgement stays with
+  whoever curates the corpus — and it is the harder half.
+- **Not a vector search.** Matching is IDF-weighted token overlap: fast,
+  inspectable, dependency-free, and explainable in terms of the terms that
+  matched. It is weaker than embeddings on paraphrase. A vector backend is a
+  reasonable future addition, not a missing feature.
+- **Not English-only.** The tokeniser is Unicode-aware, but the stemmer is
+  English-oriented. Other languages index and match correctly, just without
+  stemming.
 
-## Design notes
+## Status
 
-Five bugs found while extracting this from a production service, each of which
-would have been much harder to find later, are documented in
-[`docs/design.md`](docs/design.md):
-
-- per-request corpus rebuilds turning a sub-millisecond query into ~200ms
-- an absolute distinctiveness threshold that made small corpora unmatchable
-- a `with sqlite3.connect(...)` that leaked a file handle, because it commits but
-  does not close
-- **writes that were never committed** — invisible to in-process tests, which
-  read back through the same open connection; only a second process revealed it
-- a generator that silently dropped a whole corpus when one row was malformed
-
-The missing-commit bug is why the CLI is exercised as a separate surface. A test
-suite that only ever touches one long-lived process is not testing persistence.
+`0.1.0`. The storage, matching, guarantees and conformance suite are built and
+tested. **MCP and HTTP serving is not written yet** — the `[serve]` extra exists
+as a placeholder, and until it lands Citeseal is a library plus a CLI, not a
+network service.
 
 ## Tests
 
 No test framework required:
 
 ```console
-python tests/test_guarantees.py   # 19 checks
-python examples/demo.py           # two corpora, built and checked
+python tests/test_guarantees.py    # 20 checks: the promises
+python tests/test_adversarial.py   # 26 checks: trying to break it
+python tests/test_readme_claims.py # 7 checks: this README is not lying
+python examples/demo.py            # two corpora, built and checked
 ```
+
+The adversarial suite covers SQL injection through keys and queries, Unicode keys
+and text, concurrent writers and readers, a corrupt database, simulated crashes,
+boundary sizes, determinism, and a performance floor that catches a return of
+per-request index rebuilds.
+
+The README-claims suite executes the examples on this page against the real
+library, so a claim that stops being true fails a test rather than quietly
+misleading visitors. It caught two false statements while being written.
+
+## Design notes
+
+Bugs found while extracting this from a production service, with the reasoning,
+are in [`docs/design.md`](docs/design.md). Two worth knowing before you build on
+it:
+
+- A missing `commit()` discarded **every write** at process exit. In-process
+  tests could not detect it, because they read back through the same open
+  connection where uncommitted rows are visible. Only a second process saw it.
+- Ranking once returned an unrelated record because the query shared one common
+  word with it. Properly cited, but useless as evidence.
 
 ## Licence
 
-MIT. The durable asset is a curated, refreshed, cited corpus — not this code.
-Keeping the engine permissively licensed is deliberate.
+MIT. The durable asset in a system like this is a curated, current, cited corpus
+— not the engine. Keeping the engine permissive is deliberate.

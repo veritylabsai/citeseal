@@ -23,12 +23,46 @@ from typing import Any, Iterable
 
 __all__ = ["tokenize", "token_set", "stem", "Index", "Scored"]
 
-_WORD_RE = re.compile(r"[a-z0-9]+")
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
 
 STOPWORDS = frozenset(
     """a an and are as at be been by for from has have if in into is it its of on or
     that the their there these this to was were will with within without""".split()
 )
+
+# A candidate counts as a match only if it rests on something meaningful. Two
+# conditions, either of which is sufficient:
+#
+#   * at least one matched term is DISTINCTIVE (rare in this corpus), or
+#   * the query is almost entirely covered (>= COVERAGE_ESCAPE).
+#
+# WHY THIS EXISTS. Without it, a query matched a record on a single generic word
+# and returned found=true. Searching "kettle burn hazard" over a three-record
+# recall corpus returned both the kettle recall AND an unrelated child carrier,
+# because both bodies contain the word "hazard". Every result was properly
+# cited, so no guarantee was broken -- but an agent asking "is this recalled?"
+# would have been handed an irrelevant record as evidence.
+#
+# The coverage escape matters too: require distinctiveness alone and an
+# uninformative query ("product safety" against a corpus where every record
+# mentions both) would return nothing, which is worse than returning the corpus.
+COVERAGE_ESCAPE = 0.8
+
+
+# The score below which a candidate is not a match at all.
+#
+# WHY. Distinctiveness alone is not enough in a tiny corpus: with one record,
+# every term has df=1 and so counts as distinctive, and a query sharing a single
+# word with the only record matched it. Searching "toy choke hazard" returned a
+# kettle recall because both contained "hazard". Cited, but worthless as
+# evidence, and actively dangerous for an agent answering "is this recalled?".
+#
+# The floor is expressed on the composite score, so ~0.5 means "either roughly
+# half the query's information matched, or a distinctive term matched with
+# substantial coverage". Every real match in the test suite scores well above it
+# (typical: 1.0-1.25) and every generic-overlap false positive scores below
+# (typical: 0.03-0.42).
+MIN_SCORE = 0.5
 
 
 def stem(word: str) -> str:
@@ -38,6 +72,9 @@ def stem(word: str) -> str:
     matches "recall" and "certified" matches "certification"-ish, which is what
     actually matters for product-name and hazard-text search. Over-stemming is
     worse than under-stemming here, so the rules are deliberately conservative.
+
+    English-oriented by design. Other languages simply skip stemming rather than
+    being mangled by it.
     """
     if len(word) <= 4:
         return word
@@ -96,13 +133,24 @@ class Index:
             token: math.log((n + 1) / (len(positions) + 0.5))
             for token, positions in self._postings.items()
         }
+        # The weight of a query term the corpus has never seen. It must NOT be
+        # zero: coverage divides by the total weight of the query, so scoring
+        # absent terms at zero made them vanish from the denominator and
+        # inflated coverage to 1.0 whenever a query's other terms were missing.
+        # Concretely, "toy choke hazard" against a single kettle record scored
+        # 1.08 -- a perfect match -- on the strength of one shared common word.
+        # Treating an unseen term as maximally rare (df=0) is both correct and
+        # the only choice that keeps coverage honest.
+        self._unseen_idf = math.log((n + 1) / 0.5)
         # A term is "distinctive" if it appears in at most half the corpus. This
         # is a ratio, not an absolute count, so it behaves the same whether the
         # corpus has 10 records or 10 million.
         self.df_threshold = max(1, int(n * 0.5))
 
     def idf(self, token: str) -> float:
-        return self._idf.get(token, 0.0)
+        if token in self._idf:
+            return self._idf[token]
+        return self._unseen_idf
 
     def document_frequency(self, token: str) -> int:
         return len(self._postings.get(token, ()))
@@ -111,11 +159,14 @@ class Index:
         df = self.document_frequency(token)
         return 0 < df <= self.df_threshold
 
-    def search(self, query: str, limit: int = 10, min_score: float = 0.0) -> list[Scored]:
+    def search(self, query: str, limit: int = 10,
+               min_score: float = MIN_SCORE) -> list[Scored]:
         """Rank documents against a query.
 
         Scoring is IDF-weighted overlap with a coverage term, so a record
         matching many rare query terms beats one matching a single common term.
+        Candidates resting on nothing but common terms are discarded -- see
+        COVERAGE_ESCAPE for why that matters.
         """
         if self.size == 0:
             return []
@@ -135,20 +186,24 @@ class Index:
         results: list[Scored] = []
         for position, hits in overlap.items():
             tokens = self._tokens[position]
-            matched_idf = sum(self.idf(t) for t in query_tokens if t in tokens)
+            matched = [t for t in query_tokens if t in tokens]
+            matched_idf = sum(self.idf(t) for t in matched)
             # Coverage of the query, so a long document cannot win on volume.
             coverage = matched_idf / total_idf
             # Reward distinctive terms over generic ones.
-            distinctive = sum(
-                1 for t in query_tokens if t in tokens and self.is_distinctive(t)
-            )
+            distinctive = sum(1 for t in matched if self.is_distinctive(t))
+
+            # Reject matches that rest entirely on terms common to this corpus.
+            if distinctive == 0 and coverage < COVERAGE_ESCAPE:
+                continue
+
             score = coverage + (0.25 * distinctive / len(query_tokens))
             if score > min_score:
                 results.append(
                     Scored(
                         payload=self._payloads[position],
                         score=round(score, 4),
-                        matched=tuple(sorted(t for t in query_tokens if t in tokens)),
+                        matched=tuple(sorted(matched)),
                     )
                 )
 

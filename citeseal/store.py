@@ -272,6 +272,59 @@ class Store:
                 (key, name, url, utcnow(), record_count),
             )
 
+    def retire(self, record_id: str) -> bool:
+        """Withdraw a record from the corpus without deleting it.
+
+        A record can be withdrawn upstream (a recall gets rescinded) and the
+        corpus has to reflect that. Retiring keeps the row and its citation for
+        audit while removing it from queries.
+
+        This must go through the store rather than a direct UPDATE: it bumps the
+        data version and emits an event, which is what invalidates the search
+        index and tells subscribers something changed. Retiring with raw SQL
+        leaves a stale index serving the withdrawn record.
+
+        Returns True if the record moved to retired, False if it was already
+        retired or does not exist.
+        """
+        with self._cursor() as conn:
+            row = conn.execute(
+                "SELECT * FROM records WHERE record_id = ?", (record_id,)
+            ).fetchone()
+            if row is None or row["retired"]:
+                return False
+            conn.execute(
+                "UPDATE records SET retired = 1, observed_at = ? WHERE record_id = ?",
+                (utcnow(), record_id),
+            )
+            conn.execute(
+                """INSERT INTO events
+                   (event_type, record_id, kind, title, detail, source_url, happened_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (
+                    "record_retired", record_id, row["kind"], row["title"],
+                    "withdrawn from the corpus; retained for audit",
+                    row["source_url"], utcnow(),
+                ),
+            )
+            self._bump(conn)
+            return True
+
+    def unretire(self, record_id: str) -> bool:
+        """Return a retired record to the corpus."""
+        with self._cursor() as conn:
+            row = conn.execute(
+                "SELECT retired FROM records WHERE record_id = ?", (record_id,)
+            ).fetchone()
+            if row is None or not row["retired"]:
+                return False
+            conn.execute(
+                "UPDATE records SET retired = 0, observed_at = ? WHERE record_id = ?",
+                (utcnow(), record_id),
+            )
+            self._bump(conn)
+            return True
+
     # -- reads -------------------------------------------------------------
 
     def _row_to_record(self, row: sqlite3.Row) -> Record:
