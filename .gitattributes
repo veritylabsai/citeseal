@@ -1,0 +1,18 @@
+# Deploy targets are Linux containers and CI runners, so sources, shell scripts
+# and config must keep LF endings. Git warns that a Windows checkout would
+# rewrite them to CRLF, which breaks shebangs and produces noisy diffs.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending translated.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+
+# SQLite fixtures are binary even though they are rarely committed.
+*.sqlite3 binary
