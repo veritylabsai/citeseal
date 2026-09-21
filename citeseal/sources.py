@@ -100,8 +100,17 @@ def ingest(store: Store, source: Source, *, url: str | None = None) -> IngestRep
     Idempotent and incremental, so the correct response to a partial failure is
     simply to run it again: records already written stay written, and
     re-ingesting unchanged data is a no-op.
+
+    ADAPTER-LEVEL REJECTIONS ARE COUNTED. An adapter that uses ``build_records``
+    keeps its per-row failures on ``source.errors``. Those rows never reach the
+    store, so counting only store failures would report "0 rejected" while the
+    adapter was quietly dropping records -- the exact kind of silence that hides
+    a shrinking corpus. Any new entries on ``source.errors`` are folded into the
+    report as rejections.
     """
     report = IngestReport(source_key=source.key)
+    preexisting = len(getattr(source, "errors", None) or [])
+
     iterator = iter(source.fetch())
     while True:
         try:
@@ -129,6 +138,11 @@ def ingest(store: Store, source: Source, *, url: str | None = None) -> IngestRep
             report.changed += 1
         else:
             report.unchanged += 1
+
+    adapter_errors = list(getattr(source, "errors", None) or [])[preexisting:]
+    for message in adapter_errors:
+        report.rejected += 1
+        report.errors.append(f"adapter rejected a row: {message}")
 
     report.finished_at = utcnow()
     store.register_source(source.key, source.name, url, report.total)

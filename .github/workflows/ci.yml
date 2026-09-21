@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # The live job needs the network and a real upstream, so it runs nightly
+    # rather than on every push.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The suites are deliberately dependency-free, so there is nothing to install.
+  # That is itself worth testing: if a dependency creeps into the core, this job
+  # fails without ever running pip.
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          # One Windows leg. The store had a Windows-only file-locking bug that
+          # Linux never reproduced, so cross-platform coverage is load-bearing,
+          # not box-ticking.
+          - os: windows-latest
+            python: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Confirm the core has no runtime dependencies
+        shell: bash
+        run: |
+          python - <<'PY'
+          import ast, pathlib, sys
+          allowed = {
+              "sqlite3","json","math","re","os","sys","threading","hashlib",
+              "dataclasses","datetime","pathlib","typing","contextlib",
+              "collections","urllib","importlib","argparse","tempfile","gzip",
+              "shutil","time","warnings","textwrap","functools","itertools",
+              "logging","base64","uuid","abc","pyproject","citeseal","__future__",
+          }
+          offenders = []
+          for path in sorted(pathlib.Path("citeseal").glob("*.py")):
+              tree = ast.parse(path.read_text(encoding="utf-8"))
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      for alias in node.names:
+                          if alias.name.split(".")[0] not in allowed:
+                              offenders.append(f"{path.name}: {alias.name}")
+                  elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                      if node.module.split(".")[0] not in allowed:
+                          offenders.append(f"{path.name}: {node.module}")
+          if offenders:
+              print("third-party imports in the core:", offenders)
+              sys.exit(1)
+          print("core is dependency-free")
+          PY
+
+      - name: Guarantees
+        run: python tests/test_guarantees.py
+
+      - name: Adversarial
+        run: python tests/test_adversarial.py
+
+      - name: README claims
+        run: python tests/test_readme_claims.py
+
+      - name: Real corpus (hermetic, replayed from fixture)
+        run: python tests/test_real_corpus.py
+
+      - name: Two-corpus demo
+        run: python examples/demo.py
+
+  fuzz:
+    name: fuzz + scale
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # Includes a 20,000-record scale run. The 100k run (`--big`) is left to a
+      # nightly job because it takes a couple of minutes.
+      - run: python tests/test_stress.py
+
+  conformance:
+    name: guarantees hold on a real corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Conformance on the replay fixture
+        run: |
+          python - <<'PY'
+          import sys, tempfile
+          from pathlib import Path
+          sys.path.insert(0, ".")
+          from citeseal import Store, ingest, run_conformance
+          from examples.osv_source import OSVCorpus
+          from tests.test_real_corpus import load_fixture, replayer
+          entries = load_fixture()
+          assert entries, "fixture missing"
+          with tempfile.TemporaryDirectory() as tmp:
+              store = Store(Path(tmp) / "c.sqlite3")
+              ingest(store, OSVCorpus(fetch_json=replayer(entries)))
+              report = run_conformance(store)
+              print(report.render())
+              store.close()
+              sys.exit(0 if report.passed else 1)
+          PY
+
+  live:
+    name: live upstream smoke test
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # Hits api.osv.dev for real. --no-save so a nightly run cannot rewrite the
+      # committed fixture; refreshing it is a deliberate, reviewed act.
+      - name: Live smoke test
+        run: python tests/live_smoke.py --no-save

@@ -59,7 +59,15 @@ def _require_url(url: Any) -> str:
     if not isinstance(url, str) or not url.strip():
         raise UncitedRecordError("citation url must be a non-empty string")
     cleaned = url.strip()
-    parsed = urlparse(cleaned)
+    try:
+        parsed = urlparse(cleaned)
+    except ValueError as exc:
+        # urlparse raises a bare ValueError for some malformed inputs, notably
+        # anything with an unbalanced '[' ("Invalid IPv6 URL"). Callers are told
+        # to catch UncitedRecordError for a bad citation, so letting a different
+        # type escape here would break that contract -- and it did, until fuzzing
+        # found it.
+        raise UncitedRecordError(f"citation url could not be parsed: {cleaned!r}") from exc
     if parsed.scheme not in ("http", "https"):
         raise UncitedRecordError(
             f"citation url must be http(s), got {cleaned!r}"

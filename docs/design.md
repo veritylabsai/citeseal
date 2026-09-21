@@ -207,6 +207,129 @@ existing tests could never have noticed, because every test used Latin text and
 body-only queries. Adversarial tests are worth writing precisely because they
 attack the assumptions the happy-path tests were built on.
 
+## 8. Results were silently truncated at 600 characters
+
+The worst bug in this document, and the only one that broke the product's central
+promise rather than merely degrading it.
+
+**Symptom.** Conformance check G3 failed on the first run against a real corpus:
+
+```
+[FAIL] G3  results are stored records, not generated text
+       result vulnerability:GH29mw-... differs from the stored record
+```
+
+**Cause.** The search index cached a *prefix* of each record's body and returned
+that as the result:
+
+```python
+"body": r.body[:600],      # cached, then returned verbatim
+```
+
+A record whose body was 12,000 characters came back as 600. The output was not a
+stored record. It was a quietly shortened copy of one — which is exactly the
+class of behaviour this framework exists to make impossible.
+
+**Why nothing caught it.** Every test corpus had short bodies. The demo recalls
+were two sentences; the glossary definitions were one. A 600-character cap is
+invisible below 600 characters. It took a corpus of real advisories, whose
+`details` fields run to thousands of words, to expose it — on the very first
+run.
+
+**Fix.** The cache now holds only what scoring needs (id, kind, title) and every
+returned result is hydrated from the store:
+
+```python
+for hit in scored:
+    stored = self.store.get(hit.payload["record_id"])
+    if stored is None:
+        continue          # withdrawn since the index was built
+    payload = stored.as_dict()
+```
+
+This is strictly better than raising the cap. Verbatim is now a property of the
+code path rather than a constant someone has to remember to keep large enough —
+and it makes the cache smaller, not larger. It also closed a latent race, where a
+record retired after the index was built would still have been returned.
+
+**The general lesson.** Caching a *derived* copy of data that is otherwise
+returned verbatim creates two representations that must be kept in step, and the
+cheaper one will win. Return the data; cache only the index.
+
+## 9. Performance on a corpus larger than anything the project had tested
+
+Fuzzing and a scale run found three separate costs, all measured rather than
+guessed, on a 50,000-record corpus:
+
+| | before | after | cause |
+|---|---|---|---|
+| `_kinds()` | 24 ms | 0.1 ms | full-table `COUNT`s on every query |
+| `index.search` | 80 ms | 62 ms | per-candidate dictionary lookups; Python-level counting loop |
+| **full query** | **107 ms** | **63 ms** | |
+
+**Every query counted the whole corpus.** `Engine.search` called
+`store.counts()` — four aggregate queries including `COUNT(*)` over records,
+events and versions — purely to discover the distinct record kinds. That answer
+changes only when data changes, so it is now cached against the data version,
+like the index.
+
+**Scoring did dictionary lookups per candidate.** A common query term matches
+tens of thousands of documents in a large corpus, and for each one the scorer
+re-fetched an idf and re-tested distinctiveness for every query token. Those are
+properties of the query, not the candidate, so they are now hoisted out of the
+loop.
+
+**Candidate counting ran in Python.** `Counter.update(iterable)` is C-accelerated
+where the equivalent `for x in ...: counter[x] += 1` is not.
+
+What remains is inherent: scoring is O(documents matching the query), so cost
+grows linearly with corpus size. Measured warm-cache query time is 5 ms at 5k
+records, 16 ms at 14k, 65 ms at 50k and 163 ms at 100k. That is documented as a
+known limit in the README rather than left for a user to discover, and the
+thresholds in the stress test are calibrated to it — they exist to catch
+order-of-magnitude regressions (a return of per-request rebuilds, or of the
+per-query `COUNT`s above), not to enforce tuning.
+
+## 10. An exception type that escaped the documented contract
+
+Fuzzing malformed URLs found:
+
+```
+ValueError: Invalid IPv6 URL     # from urlparse(), on "//)Eqx[=`u=g2"
+```
+
+The contract says a bad citation raises `UncitedRecordError`. `urlparse` raises a
+bare `ValueError` for some malformed inputs — anything with an unbalanced `[` —
+and it escaped the validator unchanged. A caller writing the documented
+
+```python
+try:
+    Citation(url=user_supplied, source_name="X")
+except UncitedRecordError:
+    ...
+```
+
+would have had that input crash straight through their handler. The parse is now
+wrapped and re-raised as `UncitedRecordError`.
+
+## 11. A source could drop records without saying so
+
+The live corpus test showed the report disagreeing with reality:
+
+```
+{'new': 0, 'rejected': 0, 'errors': []}      # while the adapter refused a record
+```
+
+The OSV adapter correctly refused a vulnerability with no reference — you cannot
+cite it — but it reported that through `source.errors` (where `build_records`
+puts it), not through the `IngestReport`, which only counted failures raised by
+the store. So a corpus could shrink, the report would say nothing was wrong, and
+a monitoring job watching `rejected` would see a healthy ingest of nothing.
+
+`ingest()` now folds any *new* entries on `source.errors` into the report as
+rejections. Counting only store failures means counting only half the ways a row
+fails to arrive.
+
 ## Open questions
 
 - **Matching quality.** Token overlap is inspectable and dependency-free but

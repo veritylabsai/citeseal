@@ -198,42 +198,86 @@ Blunt, because the category invites overclaiming:
 
 ## Status
 
-`0.1.0`. The storage, matching, guarantees and conformance suite are built and
-tested. **MCP and HTTP serving is not written yet** — the `[serve]` extra exists
-as a placeholder, and until it lands Citeseal is a library plus a CLI, not a
-network service.
+`0.1.0`. Storage, matching, guarantees and the conformance suite are built and
+tested against a real upstream (OSV, ~400 live vulnerabilities) as well as
+synthetic corpora. **MCP and HTTP serving is not written yet** — the `[serve]`
+extra is a placeholder, and until it lands Citeseal is a library plus a CLI, not
+a network service.
+
+### Known limit: query time scales with corpus size
+
+Scoring is O(documents matching the query), and a common term matches a large
+fraction of a large corpus. Measured on this machine, warm cache:
+
+| records | index build | mean query | worst |
+|---|---|---|---|
+| 5,000 | 0.1s | 5 ms | 8 ms |
+| 14,000 | 0.3s | 16 ms | 37 ms |
+| 20,000 | 0.4s | 25 ms | 49 ms |
+| 50,000 | 1.2s | 65 ms | 144 ms |
+| 100,000 | 2.8s | 163 ms | 255 ms |
+
+Comfortable to roughly 50k records. Beyond that, query latency grows linearly and
+would need candidate pruning or a vector backend. It is stated here rather than
+discovered by you. Note the index is built once per process and reused — the
+numbers above do not include a rebuild, and a rebuild is what the original
+production bug was.
 
 ## Tests
 
-No test framework required:
+No test framework required. 73 checks across five suites:
 
 ```console
 python tests/test_guarantees.py    # 20 checks: the promises
 python tests/test_adversarial.py   # 26 checks: trying to break it
-python tests/test_readme_claims.py # 7 checks: this README is not lying
+python tests/test_stress.py        # 10 checks: fuzzing and scale
+python tests/test_real_corpus.py   #  9 checks: a real upstream, replayed
+python tests/test_readme_claims.py #  8 checks: this README is not lying
 python examples/demo.py            # two corpora, built and checked
 ```
 
-The adversarial suite covers SQL injection through keys and queries, Unicode keys
-and text, concurrent writers and readers, a corrupt database, simulated crashes,
-boundary sizes, determinism, and a performance floor that catches a return of
-per-request index rebuilds.
+Plus a live test that needs the network and hits the real OSV API:
 
-The README-claims suite executes the examples on this page against the real
-library, so a claim that stops being true fails a test rather than quietly
-misleading visitors. It caught two false statements while being written.
+```console
+python tests/live_smoke.py --no-save
+```
+
+What the non-obvious suites actually do:
+
+- **Adversarial** — SQL injection through keys and queries, Unicode keys and
+  text, eight concurrent writers with no lost writes, readers staying consistent
+  under concurrent mutation, a corrupt database failing loudly, simulated
+  crashes, boundary sizes, determinism.
+- **Stress** — 4,000 fuzz cases against citations, records, queries and the
+  `Answer` invariant with a fixed seed so failures reproduce; plus a scale run at
+  20k (and 100k with `--big`).
+- **Real corpus** — replays payloads recorded from live OSV, so the adapter is
+  tested against the upstream's actual shape rather than one its author invented.
+  Includes the hard rule: an OSV entry with no reference must be refused, not
+  admitted without a citation.
+- **README claims** — executes the examples on this page against the real
+  library, asserts every row of the type-guarantee table raises, and fails if a
+  stated test count drifts. It caught two false statements in my own draft.
+
+CI runs everything on Linux across Python 3.10–3.13 plus one Windows leg, checks
+the core has no third-party imports, and runs the live smoke test nightly.
 
 ## Design notes
 
-Bugs found while extracting this from a production service, with the reasoning,
-are in [`docs/design.md`](docs/design.md). Two worth knowing before you build on
-it:
+Bugs found while building this, with the reasoning, are in
+[`docs/design.md`](docs/design.md). Four worth knowing before you build on it:
 
 - A missing `commit()` discarded **every write** at process exit. In-process
   tests could not detect it, because they read back through the same open
-  connection where uncommitted rows are visible. Only a second process saw it.
-- Ranking once returned an unrelated record because the query shared one common
-  word with it. Properly cited, but useless as evidence.
+  connection where uncommitted rows are visible.
+- The index cached a 600-character prefix of each record body and returned it, so
+  **every result longer than 600 characters was silently truncated** — a direct
+  violation of the guarantee this framework exists to provide. Every test corpus
+  had short bodies; live data caught it on the first run.
+- Unseen query terms were weighted zero, so **coverage counted missing terms as
+  matches** and an unrelated query scored higher than a real one.
+- Every search ran full-table `COUNT`s to discover the record kinds, costing
+  ~24 ms per query at 50k records for an answer that changes only on write.
 
 ## Licence
 

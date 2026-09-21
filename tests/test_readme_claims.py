@@ -200,17 +200,39 @@ def test_readme_claims_unicode_aware_tokeniser():
 @test
 def test_readme_mentions_the_real_test_counts():
     """If the README states a count, it must match the suite."""
-    for name, path in (("guarantees", ROOT / "tests" / "test_guarantees.py"),
-                       ("adversarial", ROOT / "tests" / "test_adversarial.py"),
-                       ("readme_claims", ROOT / "tests" / "test_readme_claims.py")):
+    for name, path in (
+        ("guarantees", ROOT / "tests" / "test_guarantees.py"),
+        ("adversarial", ROOT / "tests" / "test_adversarial.py"),
+        ("stress", ROOT / "tests" / "test_stress.py"),
+        ("real_corpus", ROOT / "tests" / "test_real_corpus.py"),
+        ("readme_claims", ROOT / "tests" / "test_readme_claims.py"),
+    ):
         source = path.read_text(encoding="utf-8")
-        # Exclude this function's own counting loop by counting decorators.
-        count = len(re.findall(r"^@test", source, re.M))
-        claim = re.search(rf"test_{name}\.py\s+#\s*(\d+) checks", README)
+        # @guarded counts too: it is @test plus a graceful skip when the fixture
+        # is absent, and missing it made the real-corpus suite look empty.
+        count = len(re.findall(r"^@(?:test|guarded)\b", source, re.M))
+        # The README pads the number into a column, so allow extra spaces.
+        claim = re.search(rf"test_{name}\.py\s+#\s*(\d+)\s+checks", README)
         assert claim, f"README no longer states a check count for {name}"
         assert int(claim.group(1)) == count, (
             f"README says {claim.group(1)} {name} checks, suite has {count}"
         )
+
+
+@test
+def test_readme_states_a_total_that_matches():
+    counts = {}
+    for path in (ROOT / "tests").glob("test_*.py"):
+        counts[path.stem] = len(
+            re.findall(r"^@(?:test|guarded)\b", path.read_text(encoding="utf-8"), re.M)
+        )
+    total = sum(counts.values())
+    claim = re.search(r"(\d+) checks across five suites", README)
+    assert claim, "README no longer states a total"
+    assert int(claim.group(1)) == total, (
+        f"README says {claim.group(1)} checks; the suites hold {total}: {counts}"
+    )
+    assert len(counts) == 5, f"expected five suites, found {sorted(counts)}"
 
 
 def main() -> int:
