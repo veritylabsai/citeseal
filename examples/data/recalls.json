@@ -1,0 +1,32 @@
+[
+  {
+    "id": "demo-0001",
+    "title": "Northwind Recalls Aurelia Kettle Due to Burn Hazard",
+    "hazard": "The kettle's lid can detach during pouring, releasing scalding water onto the user.",
+    "remedy": "Consumers should stop using the kettle and contact Northwind for a full refund.",
+    "url": "https://example.gov/recalls/northwind-aurelia-kettle",
+    "agency": "Consumer Product Safety Commission",
+    "date": "2026-03-14",
+    "units": "About 42,000"
+  },
+  {
+    "id": "demo-0002",
+    "title": "Halcyon Recalls Trailhead Child Carrier Due to Fall Hazard",
+    "hazard": "The carrier's hip belt buckle can release unexpectedly, allowing the child to fall.",
+    "remedy": "Consumers should stop using the carrier and contact Halcyon for a free repair kit.",
+    "url": "https://example.gov/recalls/halcyon-trailhead-carrier",
+    "agency": "Consumer Product Safety Commission",
+    "date": "2026-02-27",
+    "units": "About 8,600"
+  },
+  {
+    "id": "demo-0003",
+    "title": "Vantage Foods Recalls Smoked Salmon Due to Listeria Risk",
+    "hazard": "The product may be contaminated with Listeria monocytogenes.",
+    "remedy": "Consumers should not eat the product and should return it to the place of purchase.",
+    "url": "https://example.gov/enforcement/vantage-smoked-salmon",
+    "agency": "Food and Drug Administration",
+    "date": "2026-01-19",
+    "units": "About 1,200 cases"
+  }
+]

@@ -1,0 +1,23 @@
+[
+  {
+    "term": "Children's Product Certificate",
+    "definition": "A written document in which a manufacturer or importer certifies that a children's product complies with the applicable children's product safety rules, based on testing at a CPSC-accepted laboratory.",
+    "source": "https://example.gov/business/cpc",
+    "authority": "Consumer Product Safety Commission",
+    "market": "US"
+  },
+  {
+    "term": "General Product Safety Regulation",
+    "definition": "Regulation (EU) 2023/988, applicable from 13 December 2024, setting safety requirements for consumer products placed or made available on the Union market.",
+    "source": "https://example.org/eli/reg/2023/988/oj",
+    "authority": "European Union",
+    "market": "EU"
+  },
+  {
+    "term": "Substance of Very High Concern",
+    "definition": "A substance meeting the criteria in REACH Article 57, placed on the ECHA Candidate List, which triggers notification and communication duties for suppliers of articles.",
+    "source": "https://example.org/candidate-list-table",
+    "authority": "European Chemicals Agency",
+    "market": "EU"
+  }
+]

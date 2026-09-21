@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "citeseal"
+version = "0.1.0"
+description = "Cited-or-nothing retrieval: turn a corpus into a ground-truth MCP server that cannot invent an answer."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["mcp", "rag", "citations", "ground-truth", "hallucination", "ai-agents"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+
+# The core has NO dependencies on purpose: storage is SQLite from the standard
+# library and the only network call is urllib. A framework that promises
+# auditability should be installable and inspectable without a dependency tree.
+dependencies = []
+
+[project.optional-dependencies]
+# Serving a corpus over MCP and HTTP is optional; ingest, storage and querying
+# work with the standard library alone.
+serve = ["fastapi>=0.110", "uvicorn>=0.27", "mcp>=1.2"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+citeseal = "citeseal.__main__:main"
+citeseal-conformance = "citeseal.conformance:main"
+
+[project.urls]
+Homepage = "https://github.com/veritylabsai/citeseal"
+Issues = "https://github.com/veritylabsai/citeseal/issues"
+
+[tool.setuptools]
+packages = ["citeseal"]
